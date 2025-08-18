@@ -19,6 +19,61 @@ void *thread_func(void *arg) {
     return NULL;
 }
 
+// ================= Thread-Safe Queue =================
+typedef struct Node {
+    char *data;
+    struct Node *next;
+} Node;
+
+typedef struct {
+    Node *head;
+    Node *tail;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+} Queue;
+
+void init_queue(Queue *q) {
+    q->head = q->tail = NULL;
+    pthread_mutex_init(&q->lock, NULL);
+    pthread_cond_init(&q->cond, NULL);
+}
+
+void enqueue(Queue *q, char *data) {
+    Node *node = malloc(sizeof(Node));
+    if (!node) {
+        perror("malloc");
+        exit(1);
+    }
+    node->data = data;
+    node->next = NULL;
+    pthread_mutex_lock(&q->lock);
+    if (q->tail) {
+        q->tail->next = node;
+    } else {
+        q->head = node;
+    }
+    q->tail = node;
+    pthread_cond_signal(&q->cond);
+    pthread_mutex_unlock(&q->lock);
+}
+
+char *dequeue(Queue *q) {
+    pthread_mutex_lock(&q->lock);
+    while (q->head == NULL) {
+        pthread_cond_wait(&q->cond, &q->lock);
+    }
+    Node *node = q->head;
+    char *data = node->data;
+    q->head = node->next;
+    if (q->head == NULL) {
+        q->tail = NULL;
+    }
+    pthread_mutex_unlock(&q->lock);
+    free(node);
+    return data;
+}
+// =====================================================
+
 int main(int argc, char *argv[]) {
     if (argc != 5 || strcmp(argv[1], "-n") != 0 || strcmp(argv[3], "-c") != 0) {
         fprintf(stderr, "Usage: cat file | ./parapipe -n <num_threads> -c \"cmd\"\n");

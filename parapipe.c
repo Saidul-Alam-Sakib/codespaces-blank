@@ -166,6 +166,16 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < num_cmds; i++) free(cmds[i]);
     free(cmds);
 
-    // (Threads and queue setup will be used in later commits)
+    // ====================== Threads commented out ======================
+    // pthread_t threads[num_threads];
+    // for (int i = 0; i < num_threads; i++) {
+    //     pthread_create(&threads[i], NULL, thread_func, NULL);
+    // }
+
+    // for (int i = 0; i < num_threads; i++) {
+    //     pthread_join(threads[i], NULL);
+    // }
+    // ===================================================================
+
     return 0;
 }

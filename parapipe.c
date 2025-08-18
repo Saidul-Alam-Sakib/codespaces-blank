@@ -8,23 +8,7 @@
 #include <ctype.h>
 #include <errno.h>
 
-int num_threads;
-char *command;
-
-void *thread_func(void *arg) {
-    FILE *cmd = popen(command, "w");
-    if (!cmd) {
-        perror("popen");
-        pthread_exit(NULL);
-    }
-
-    // Just for testing: send fixed data
-    fprintf(cmd, "abc\n123\nabc123\nxyz\n");
-    pclose(cmd);
-    return NULL;
-}
-
-// ================= Thread-Safe Queue =================
+// ==================== Thread-Safe Queue ====================
 typedef struct Node {
     char *data;
     struct Node *next;
@@ -77,14 +61,12 @@ char *dequeue(Queue *q) {
     free(node);
     return data;
 }
-// =====================================================
+// ============================================================
 
-// ============== Command Parsing ======================
+// ==================== Command Parsing =======================
 char **parse_commands(char *cmd_str, int *num_cmds) {
-    // Trim leading spaces
     while (isspace(*cmd_str)) cmd_str++;
 
-    // Count commands
     int count = 1;
     char *p = cmd_str;
     while ((p = strstr(p, "->"))) {
@@ -102,7 +84,6 @@ char **parse_commands(char *cmd_str, int *num_cmds) {
     char *start = p;
     int i = 0;
     while ((p = strstr(p, "->"))) {
-        // Trim trailing spaces before ->
         char *end = p - 1;
         while (end > start && isspace(*end)) end--;
         end++;
@@ -115,14 +96,12 @@ char **parse_commands(char *cmd_str, int *num_cmds) {
         strncpy(cmds[i], start, end - start);
         cmds[i][end - start] = '\0';
 
-        // Skip -> and trim leading spaces after
         p += 2;
         while (isspace(*p)) p++;
         start = p;
         i++;
     }
 
-    // Last command
     char *end = cmd_str + strlen(cmd_str) - 1;
     while (end > start && isspace(*end)) end--;
     end++;
@@ -138,7 +117,50 @@ char **parse_commands(char *cmd_str, int *num_cmds) {
     *num_cmds = count;
     return cmds;
 }
-// =====================================================
+// ============================================================
+
+// =================== Worker & Receiver Structs ============
+typedef struct {
+    Queue *input_q;
+    Queue *output_q;
+    char **cmds;
+    int num_cmds;
+} WorkerArg;
+
+typedef struct {
+    Queue *q;
+    int n; // number of workers to expect NULLs
+} ReceiverArg;
+// ============================================================
+
+// =================== Thread Skeletons ======================
+void *worker_func(void *arg) {
+    WorkerArg *wa = (WorkerArg *)arg;
+    // TODO: implement pipeline execution:
+    // 1. dequeue from input_q
+    // 2. run through cmds
+    // 3. enqueue output lines to output_q
+    // 4. enqueue NULL when finished
+    return NULL;
+}
+
+void *receiver_func(void *arg) {
+    ReceiverArg *ra = (ReceiverArg *)arg;
+    Queue *q = ra->q;
+    int n = ra->n;
+    int ends = 0;
+    while (ends < n) {
+        char *line = dequeue(q);
+        if (line == NULL) {
+            ends++;
+            continue;
+        }
+        printf("%s", line); // line already contains \n
+        free(line);
+    }
+    return NULL;
+}
+// ============================================================
 
 int main(int argc, char *argv[]) {
     if (argc != 5 || strcmp(argv[1], "-n") != 0 || strcmp(argv[3], "-c") != 0) {
@@ -146,36 +168,77 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    num_threads = atoi(argv[2]);
+    int num_threads = atoi(argv[2]);
     if (num_threads <= 0) {
         fprintf(stderr, "Invalid number of threads\n");
         exit(1);
     }
 
     char *cmd_str = argv[4];
-
     int num_cmds;
     char **cmds = parse_commands(cmd_str, &num_cmds);
 
-    printf("Threads: %d, Command count: %d\n", num_threads, num_cmds);  // Debug
-    for (int i = 0; i < num_cmds; i++) {
-        printf("Cmd %d: %s\n", i, cmds[i]);
+    // Initialize input queues for workers
+    Queue *input_queues = malloc(num_threads * sizeof(Queue));
+    if (!input_queues) { perror("malloc"); exit(1); }
+    for (int i = 0; i < num_threads; i++) init_queue(&input_queues[i]);
+
+    // Initialize shared output queue
+    Queue output_q;
+    init_queue(&output_q);
+
+    // Start receiver thread
+    ReceiverArg rarg = {&output_q, num_threads};
+    pthread_t receiver_tid;
+    if (pthread_create(&receiver_tid, NULL, receiver_func, &rarg)) {
+        perror("pthread_create"); exit(1);
     }
 
-    // Free parsed commands
+    // Start worker threads
+    pthread_t *worker_tids = malloc(num_threads * sizeof(pthread_t));
+    WorkerArg *wargs = malloc(num_threads * sizeof(WorkerArg));
+    for (int i = 0; i < num_threads; i++) {
+        wargs[i].input_q = &input_queues[i];
+        wargs[i].output_q = &output_q;
+        wargs[i].cmds = cmds;
+        wargs[i].num_cmds = num_cmds;
+        if (pthread_create(&worker_tids[i], NULL, worker_func, &wargs[i])) {
+            perror("pthread_create"); exit(1);
+        }
+    }
+
+    // Read stdin and distribute lines round-robin
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read_len;
+    int thread_idx = 0;
+    while ((read_len = getline(&line, &len, stdin)) != -1) {
+        char *dup = strdup(line);
+        if (!dup) { perror("strdup"); exit(1); }
+        enqueue(&input_queues[thread_idx], dup);
+        thread_idx = (thread_idx + 1) % num_threads;
+    }
+    free(line);
+
+    // Signal end to workers
+    for (int i = 0; i < num_threads; i++) {
+        enqueue(&input_queues[i], NULL);
+    }
+
+    // Join worker threads
+    for (int i = 0; i < num_threads; i++) {
+        pthread_join(worker_tids[i], NULL);
+    }
+
+    // Join receiver thread
+    pthread_join(receiver_tid, NULL);
+
+    // Cleanup
     for (int i = 0; i < num_cmds; i++) free(cmds[i]);
     free(cmds);
-
-    // ====================== Threads commented out ======================
-    // pthread_t threads[num_threads];
-    // for (int i = 0; i < num_threads; i++) {
-    //     pthread_create(&threads[i], NULL, thread_func, NULL);
-    // }
-
-    // for (int i = 0; i < num_threads; i++) {
-    //     pthread_join(threads[i], NULL);
-    // }
-    // ===================================================================
+    free(input_queues);
+    free(worker_tids);
+    free(wargs);
 
     return 0;
 }
